@@ -1,0 +1,15 @@
+# Checkout map for `./ape sync` (clone if missing, fetch+checkout ref if already a nested git repo).
+# Destination is path + name, e.g. src/ + Ape.Core → src/Ape.Core.
+# Pin `ref` to a tag or SHA once remotes exist; `main` is temporary.
+#
+core:
+  name: Ape.Core
+  url: https://github.com/aklen/ape-core
+  ref: main
+  path: src/
+launcher:
+  name: Ape.Launcher
+  url: https://github.com/aklen/ape-launcher
+  ref: main
+  path: src/
+modules: []

@@ -1,0 +1,14 @@
+<Project>
+  <PropertyGroup>
+    <!-- Centralized build output directories -->
+    <BaseOutputPath>$(MSBuildThisFileDirectory)build/bin/$(MSBuildProjectName)/</BaseOutputPath>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)build/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
+    
+    <!-- Clean output on rebuild -->
+    <AppendTargetFrameworkToOutputPath>true</AppendTargetFrameworkToOutputPath>
+    
+    <!-- Optional: Copy output to a unified directory for easier plugin loading -->
+    <OutputPath>$(BaseOutputPath)$(Configuration)/$(TargetFramework)/</OutputPath>
+    <IntermediateOutputPath>$(BaseIntermediateOutputPath)$(Configuration)/$(TargetFramework)/</IntermediateOutputPath>
+  </PropertyGroup>
+</Project>
