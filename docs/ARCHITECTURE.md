@@ -1274,7 +1274,7 @@ A frozen plan is a **fixed program**: declaration-order stages, FIFO HSM, **per-
 
 ## Concurrency (summary)
 
-Plugins run on **separate threads**. Scene objects use `ApeReplica.SyncRoot`. New code should submit scene mutations via the commit pipeline ([DETERMINISM.md](../src/Ape.Core/docs/DETERMINISM.md)). Graph plugins still **SAMPLE / TICK / COMMIT** on the host frame — do not treat the plugin thread (`OnRun`) as the reducer. See [CONTRIBUTING.md](CONTRIBUTING.md) § Thread safety.
+Plugins run on **separate threads**. Scene objects use `ApeReplica.SyncRoot`. New code should submit scene mutations via the commit pipeline ([DETERMINISM.md](../src/Ape.Core/docs/DETERMINISM.md)). Graph plugins still **SAMPLE / TICK / COMMIT** on the host frame — do not treat the plugin thread (`OnRun`) as the reducer. See [CONTRIBUTING.md](CONTRIBUTING.md) § Concurrency and thread safety.
 
 ---
 
