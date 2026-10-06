@@ -5,13 +5,15 @@ A unified command-line interface for building, running, and managing ApeCore.
 """
 
 import os
+import re
 import sys
+import platform
 import subprocess
 import shutil
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 
 def iter_module_dirs() -> List[Path]:
@@ -78,8 +80,11 @@ CONFIGURATION = os.environ.get("APE_BUILD_CONFIGURATION", "Release")
 ROOT_DIR = Path(__file__).parent.absolute()
 WORKSPACE_YAML = ROOT_DIR / "workspace.yaml"
 BUILD_DIR = ROOT_DIR / "build"
-OUTPUT_DIR = BUILD_DIR / "bin" / "Ape.Launcher" / CONFIGURATION / "net9.0"
 LAUNCHER_CSPROJ = ROOT_DIR / "src" / "Ape.Launcher" / "Ape.Launcher.csproj"
+_TFM_TAG_RE = re.compile(r"<TargetFrameworks?>([^<]+)</TargetFrameworks?>", re.IGNORECASE)
+_NET_TFM_RE = re.compile(r"^net(\d+)\.(\d+)$")
+_SDK_LINE_RE = re.compile(r"^(\d+\.\d+\.\d+\S*)\s+\[(.+)\]\s*$")
+_RUNTIME_LINE_RE = re.compile(r"^(\S+)\s+(\d+\.\d+\.\d+\S*)\s+\[(.+)\]\s*$")
 
 
 def print_header(message: str):
@@ -107,17 +112,318 @@ def print_warning(message: str):
     print(f"{Colors.YELLOW}{message}{Colors.NC}")
 
 
+def _tfms_in_csproj(path: Path) -> List[str]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    found: List[str] = []
+    for match in _TFM_TAG_RE.finditer(text):
+        for part in match.group(1).split(";"):
+            tfm = part.strip()
+            if tfm:
+                found.append(tfm)
+    return found
+
+
+def required_bands() -> List[Tuple[int, int]]:
+    """TargetFramework bands (9, 0) / (10, 0) declared by checked-out projects."""
+    bands: List[Tuple[int, int]] = []
+    for csproj in sorted(ROOT_DIR.glob("src/**/*.csproj")):
+        for tfm in _tfms_in_csproj(csproj):
+            match = _NET_TFM_RE.fullmatch(tfm)
+            if not match:
+                continue
+            band = (int(match.group(1)), int(match.group(2)))
+            if band not in bands:
+                bands.append(band)
+    return bands
+
+
+def launcher_tfm() -> str:
+    """Output folder name, from the launcher csproj so a net10.0 switch follows."""
+    if LAUNCHER_CSPROJ.is_file():
+        for tfm in _tfms_in_csproj(LAUNCHER_CSPROJ):
+            if _NET_TFM_RE.fullmatch(tfm):
+                return tfm
+    bands = required_bands()
+    if bands:
+        major, minor = bands[0]
+        return f"net{major}.{minor}"
+    return "net9.0"
+
+
+def launcher_output_dir() -> Path:
+    return BUILD_DIR / "bin" / "Ape.Launcher" / CONFIGURATION / launcher_tfm()
+
+
+def _band_label(band: Tuple[int, int]) -> str:
+    return f"{band[0]}.{band[1]}"
+
+
+def _version_band(version: str) -> Optional[Tuple[int, int]]:
+    parts = version.split(".")
+    if len(parts) < 2:
+        return None
+    try:
+        return (int(parts[0]), int(parts[1]))
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class HostPlatform:
+    kind: str
+    label: str
+    version: str
+
+
+@dataclass(frozen=True)
+class DotnetInventory:
+    sdks: List[str]
+    core_runtimes: List[str]
+    sdk_dirs: List[str]
+
+
+def detect_host() -> HostPlatform:
+    """Ubuntu, Arch, macOS, Windows, or another Linux."""
+    if sys.platform == "darwin":
+        arch = "Arm64" if platform.machine() in ("arm64", "aarch64") else "x64"
+        return HostPlatform("macos", f"macOS ({arch})", "")
+    if sys.platform == "win32":
+        arch = {"AMD64": "x64", "ARM64": "Arm64", "x86": "x86"}.get(platform.machine(), platform.machine())
+        return HostPlatform("windows", f"Windows ({arch})", "")
+
+    release: dict = {}
+    os_release = Path("/etc/os-release")
+    if os_release.is_file():
+        for line in os_release.read_text(encoding="utf-8").splitlines():
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            release[key] = value.strip().strip('"').strip("'")
+    distro = release.get("ID", "")
+    like = release.get("ID_LIKE", "").split()
+    version = release.get("VERSION_ID", "")
+    pretty = release.get("PRETTY_NAME") or distro or "Linux"
+    if distro == "ubuntu" or "ubuntu" in like:
+        return HostPlatform("ubuntu", pretty, version)
+    if distro in ("arch", "manjaro", "endeavouros", "garuda") or "arch" in like:
+        return HostPlatform("arch", pretty, version)
+    return HostPlatform("linux", pretty, version)
+
+
+def _capture_lines(cmd: List[str]) -> Optional[List[str]]:
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        return None
+    if result.returncode != 0:
+        return None
+    return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+
+def query_dotnet() -> Optional[DotnetInventory]:
+    if shutil.which("dotnet") is None:
+        return None
+    sdk_lines = _capture_lines(["dotnet", "--list-sdks"])
+    runtime_lines = _capture_lines(["dotnet", "--list-runtimes"])
+    if sdk_lines is None or runtime_lines is None:
+        return None
+    sdks: List[str] = []
+    sdk_dirs: List[str] = []
+    for line in sdk_lines:
+        match = _SDK_LINE_RE.match(line)
+        if not match:
+            continue
+        sdks.append(match.group(1))
+        sdk_dirs.append(match.group(2))
+    runtimes: List[str] = []
+    for line in runtime_lines:
+        match = _RUNTIME_LINE_RE.match(line)
+        if match and match.group(1) == "Microsoft.NETCore.App":
+            runtimes.append(match.group(2))
+    return DotnetInventory(sdks, runtimes, sdk_dirs)
+
+
+def _versions_for_band(versions: Sequence[str], band: Tuple[int, int]) -> List[str]:
+    prefix = f"{_band_label(band)}."
+    exact = _band_label(band)
+    return [version for version in versions if version == exact or version.startswith(prefix)]
+
+
+def _has_targeting_pack(inventory: DotnetInventory, band: Tuple[int, int]) -> bool:
+    prefix = _band_label(band)
+    roots = {Path(sdk_dir).parent for sdk_dir in inventory.sdk_dirs}
+    for root in roots:
+        pack_dir = root / "packs" / "Microsoft.NETCore.App.Ref"
+        if not pack_dir.is_dir():
+            continue
+        for child in pack_dir.iterdir():
+            if child.name == prefix or child.name.startswith(prefix + "."):
+                return True
+    return False
+
+
+def _can_build_band(inventory: DotnetInventory, band: Tuple[int, int]) -> bool:
+    if _versions_for_band(inventory.sdks, band):
+        return True
+    newer = False
+    for version in inventory.sdks:
+        installed = _version_band(version)
+        if installed is not None and installed > band:
+            newer = True
+            break
+    return newer and _has_targeting_pack(inventory, band)
+
+
+def _ubuntu_needs_backports(version_id: str, band: Tuple[int, int]) -> bool:
+    """Microsoft's Ubuntu feeds: 22.04 keeps 9 and 10 in ppa:dotnet/backports."""
+    try:
+        major_s, minor_s = version_id.split(".", 1)
+        release = (int(major_s), int(minor_s.split(".", 1)[0]))
+    except ValueError:
+        return band != (10, 0)
+    if release <= (22, 4):
+        return True
+    if release == (24, 4):
+        return band not in ((8, 0), (10, 0))
+    if release in ((25, 4), (25, 10)):
+        return False
+    if release >= (26, 4):
+        return band != (10, 0)
+    return True
+
+
+def _ubuntu_doc_url(version_id: str, band: Tuple[int, int]) -> str:
+    pivot = {
+        "22.04": "os-linux-ubuntu-2204",
+        "24.04": "os-linux-ubuntu-2404",
+        "25.04": "os-linux-ubuntu-2504",
+        "25.10": "os-linux-ubuntu-2510",
+        "26.04": "os-linux-ubuntu-2604",
+    }.get(version_id)
+    url = (
+        "https://learn.microsoft.com/en-us/dotnet/core/install/linux-ubuntu-install"
+        f"?tabs=dotnet{band[0]}"
+    )
+    if pivot:
+        url += f"&pivots={pivot}"
+    return url
+
+
+def print_dotnet_install(host: HostPlatform, band: Tuple[int, int], need: str) -> None:
+    """Print the package-manager commands for this machine and the required band."""
+    label = _band_label(band)
+    package = f"dotnet-{'sdk' if need == 'sdk' else 'runtime'}-{label}"
+    print_info(f"This workspace targets net{label}.")
+    if need == "sdk":
+        print_info(f"Install the .NET {label} SDK. It includes the runtime.")
+    else:
+        print_info(f"Install the .NET {label} runtime ({package}).")
+
+    if host.kind == "ubuntu":
+        print_info(f"The apt package is {package}, not dotnet.")
+        if _ubuntu_needs_backports(host.version, band):
+            print_info("  sudo add-apt-repository ppa:dotnet/backports")
+        print_info(f"  sudo apt-get update && sudo apt-get install -y {package}")
+        print_info(_ubuntu_doc_url(host.version, band))
+        return
+
+    if host.kind == "arch":
+        print_info(f"  sudo pacman -S {package}")
+        print_info("https://wiki.archlinux.org/title/.NET")
+        return
+
+    if host.kind == "macos":
+        if need == "sdk" and band == (10, 0):
+            print_info("  brew install --cask dotnet-sdk")
+        elif need == "sdk" and band == (9, 0):
+            print_info("  brew install --cask dotnet-sdk@9")
+        else:
+            print_info(f"  https://dotnet.microsoft.com/download/dotnet/{label}")
+        arch = "Arm64" if "Arm64" in host.label else "x64"
+        print_info(
+            f"Or the {arch} installer: https://dotnet.microsoft.com/download/dotnet/{label}"
+        )
+        print_info("https://learn.microsoft.com/en-us/dotnet/core/install/macos")
+        return
+
+    if host.kind == "windows":
+        product = "SDK" if need == "sdk" else "Runtime"
+        print_info(f"  winget install Microsoft.DotNet.{product}.{band[0]}")
+        print_info("https://learn.microsoft.com/en-us/dotnet/core/install/windows")
+        return
+
+    print_info("https://learn.microsoft.com/en-us/dotnet/core/install/linux")
+    print_info(f"https://dotnet.microsoft.com/download/dotnet/{label}")
+
+
+def ensure_dotnet(require_runtime: bool) -> bool:
+    """True when the SDK (and runtime, when executing) matches the project TFM."""
+    host = detect_host()
+    bands = required_bands()
+    if shutil.which("dotnet") is None:
+        print_error("dotnet was not found on PATH")
+        targets = bands or [(10, 0)]
+        if not bands:
+            print_info("No project TargetFramework found yet. Install the .NET SDK, then run ./ape sync.")
+        for band in targets:
+            print_dotnet_install(host, band, "sdk")
+        return False
+
+    inventory = query_dotnet()
+    if inventory is None:
+        print_error("dotnet is on PATH, but 'dotnet --list-sdks' failed")
+        return False
+
+    if not bands:
+        print_warning("No net*.* TargetFramework under src/; skipping the SDK version check")
+        return True
+
+    ok = True
+    summaries: List[str] = []
+    for band in bands:
+        label = _band_label(band)
+        sdks = _versions_for_band(inventory.sdks, band)
+        runtimes = _versions_for_band(inventory.core_runtimes, band)
+        if not _can_build_band(inventory, band):
+            print_error(f".NET {label} SDK is not installed (have SDKs: {', '.join(inventory.sdks) or 'none'})")
+            print_dotnet_install(host, band, "sdk")
+            ok = False
+            continue
+        if require_runtime and not runtimes:
+            print_error(f".NET {label} runtime is not installed")
+            print_dotnet_install(host, band, "runtime")
+            ok = False
+            continue
+        sdk_shown = sdks[-1] if sdks else "via newer SDK + targeting pack"
+        runtime_shown = runtimes[-1] if runtimes else "not checked"
+        summaries.append(f"SDK {sdk_shown}, runtime {runtime_shown} (net{label})")
+
+    if ok and summaries:
+        print_info(f"{'; '.join(summaries)} on {host.label}")
+    return ok
+
+
 def run_command(cmd: List[str], cwd: Optional[Path] = None, quiet: bool = False) -> int:
     """Run a shell command and return exit code."""
     if not quiet:
         print_info(f"Running: {' '.join(cmd)}")
-    
-    result = subprocess.run(
-        cmd,
-        cwd=cwd or ROOT_DIR,
-        capture_output=quiet,
-        text=True
-    )
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=cwd or ROOT_DIR,
+            capture_output=quiet,
+            text=True
+        )
+    except FileNotFoundError:
+        missing = cmd[0] if cmd else "command"
+        print_error(f"{missing} was not found on PATH")
+        if missing == "dotnet":
+            ensure_dotnet(require_runtime=False)
+        return 127
     return result.returncode
 
 
@@ -127,11 +433,14 @@ def clean(args):
     print_info(f"Configuration: {CONFIGURATION} (set APE_BUILD_CONFIGURATION to override)")
     
     # Run dotnet clean on the solution so all projects match CONFIGURATION
-    sln = ROOT_DIR / "ApeCore.sln"
-    clean_cmd = ["dotnet", "clean", "-c", CONFIGURATION]
-    if sln.exists():
-        clean_cmd.append(str(sln))
-    run_command(clean_cmd)
+    if getattr(args, "skip_dotnet", False):
+        print_warning("Skipping dotnet clean; removing local build folders")
+    else:
+        sln = ROOT_DIR / "ApeCore.sln"
+        clean_cmd = ["dotnet", "clean", "-c", CONFIGURATION]
+        if sln.exists():
+            clean_cmd.append(str(sln))
+        run_command(clean_cmd)
     
     # Remove build directory
     if BUILD_DIR.exists():
@@ -305,7 +614,7 @@ def build(args):
 
     print()
     print_header("Build Complete")
-    print_info(f"Process output: {OUTPUT_DIR.relative_to(ROOT_DIR)}")
+    print_info(f"Process output: {launcher_output_dir().relative_to(ROOT_DIR)}")
     print_info(f"Run with: {Colors.YELLOW}./ape run{Colors.NC}")
 
 
@@ -750,7 +1059,14 @@ Plain "dotnet run" without -c uses Debug — a different output folder. Use one 
     if not args.command:
         parser.print_help()
         sys.exit(1)
-    
+
+    if args.command in ("build", "run", "publish", "clean"):
+        ready = ensure_dotnet(require_runtime=args.command == "run")
+        if not ready and args.command != "clean":
+            sys.exit(1)
+        if args.command == "clean":
+            args.skip_dotnet = not ready
+
     # Execute command
     args.func(args)
 
