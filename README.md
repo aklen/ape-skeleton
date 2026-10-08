@@ -83,6 +83,7 @@ Other Linux distributions: [Install .NET on Linux](https://learn.microsoft.com/e
 See [docs/README.md](docs/README.md). After `./ape sync`:
 
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) — workspace map
+- [BUILD.md](docs/BUILD.md) — what `./ape build` compiles
 - [CONTRIBUTING.md](docs/CONTRIBUTING.md) — style and commits
 - Core [DETERMINISM.md](src/Ape.Core/docs/DETERMINISM.md) and [NETWORKING.md](src/Ape.Core/docs/NETWORKING.md)
 

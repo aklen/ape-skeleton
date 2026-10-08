@@ -51,8 +51,9 @@ def get_plugin_csproj(plugin_name: str) -> Optional[Path]:
     return None
 
 
-def is_ape_core_artifact_name(target: str) -> bool:
-    return target == "Ape.Core"
+def is_launcher_build_name(target: str) -> bool:
+    """Ape.Core and Ape.Launcher both select `dotnet build` of the launcher project."""
+    return target in ("Ape.Core", "Ape.Launcher") or target.lower() in ("core", "launcher")
 
 
 def get_ape_module_path(module_spec: str) -> Optional[Path]:
@@ -544,7 +545,7 @@ def build(args):
         print_header("Building: launcher (checked-out modules + plugins)")
     else:
         for target in args.targets:
-            if target.lower() == "core" or is_ape_core_artifact_name(target):
+            if is_launcher_build_name(target):
                 build_core_flag = True
             elif is_ape_module_artifact_name(target):
                 if target not in module_artifacts:
@@ -564,12 +565,15 @@ def build(args):
                     print_error(f"Unknown target: {target}")
                     plugins = ", ".join(plugin_short_name(p) for p in iter_plugin_csprojs()) or "(none checked out)"
                     print_info(f"Plugins: {plugins}")
-                print_info(f"Also supported: {Colors.CYAN}Ape.Core{Colors.NC} and {Colors.CYAN}Ape.Module.<Name>{Colors.NC}")
+                print_info(
+                    f"Also supported: {Colors.CYAN}Ape.Launcher{Colors.NC}, "
+                    f"{Colors.CYAN}Ape.Core{Colors.NC}, and {Colors.CYAN}Ape.Module.<Name>{Colors.NC}"
+                )
                 sys.exit(1)
 
         parts = []
         if build_core_flag:
-            parts.append("Ape.Core")
+            parts.append("Ape.Launcher")
         for m in module_artifacts:
             parts.append(m)
         if build_plugins_flag:
@@ -984,11 +988,14 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  ./ape build                      Build launcher + checked-out modules/plugins
-  ./ape build Ape.Core             Same as ./ape build (solution / launcher)
-  ./ape build Ape.Module.DeviceManager       That module + its Plugins/, then refresh launcher copy
-  ./ape build plugins              Build launcher (glob copies all plugin DLLs)
-  ./ape build UbloxF9              One plugin by short name, then refresh launcher copy
+  ./ape build                      Build the launcher project (Core + checked-out modules)
+  ./ape build Ape.Launcher         Same launcher project as ./ape build
+  ./ape build Ape.Core             Same as ./ape build Ape.Launcher
+  ./ape build Ape.Module.DeviceManager       That module + its Plugins/, then refresh the launcher
+  ./ape build plugins              Same launcher project (its references copy plugin DLLs)
+  ./ape build UbloxF9              One plugin by short name, then refresh the launcher
+
+  What each form compiles is described in docs/BUILD.md.
   ./ape run                        Run launcher (-c Release) with optional config after --
   ./ape run -c server-ping.json    Run with specific config
   ./ape sync                       Clone/update checkouts from workspace.yaml
@@ -1013,7 +1020,7 @@ Plain "dotnet run" without -c uses Debug — a different output folder. Use one 
     parser_build.add_argument(
         'targets',
         nargs='*',
-        help='Targets: Ape.Core, Ape.Module.<Name>, plugins, or short plugin names (UbloxF9, SmsClient, ...)',
+        help='Targets: Ape.Launcher, Ape.Core, Ape.Module.<Name>, plugins, or short plugin names (UbloxF9, SmsClient, ...)',
     )
     parser_build.set_defaults(func=build)
     
