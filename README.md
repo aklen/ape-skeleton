@@ -5,15 +5,16 @@ Workspace vessel: clone this repo, then pull Core, Launcher, and any modules wit
 ```bash
 git clone https://github.com/aklen/ape-skeleton.git
 cd ape-skeleton
+cp workspace.yaml.example workspace.yaml
 ./ape sync
 ./ape build
 ```
 
 `./ape build` and `./ape run` need the .NET SDK that matches `TargetFramework` in the checked-out projects. That is **net10.0**. `./ape` reads the csproj files, detects the OS, and prints the install command when the SDK or runtime is missing. `apt install dotnet` is not that package.
 
-`workspace.yaml` lists remotes. Checkouts land under `src/` and are gitignored here — their history lives in those repos.
+`workspace.yaml` lists remotes and stays local to each clone. Copy `workspace.yaml.example` to create it. Checkouts land under `src/` and are gitignored here — their history lives in those repos.
 
-Add a module by appending it under `modules:` and running `./ape sync` again. A product stack is this skeleton plus a yaml (and host JSON), not a fork of Core.
+Add a module by appending it under `modules:` and running `./ape sync` again. Each developer keeps their own list. A product stack is this skeleton plus a yaml (and host JSON), not a fork of Core.
 
 ## Install .NET 10
 

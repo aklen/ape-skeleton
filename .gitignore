@@ -165,6 +165,9 @@ outputs/
 *.wav
 *.ogg
 
+# Per-developer checkout map. Copy workspace.yaml.example to workspace.yaml.
+/workspace.yaml
+
 # Checkouts from `./ape sync` (source lives in the listed remotes)
 /src/Ape.Core/
 /src/Ape.Launcher/

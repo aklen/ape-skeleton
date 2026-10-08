@@ -2,6 +2,8 @@
 # Destination is path + name, e.g. src/ + Ape.Core → src/Ape.Core.
 # Pin `ref` to a tag or SHA once remotes exist; `main` is temporary.
 #
+# Copy this file to workspace.yaml. That copy is local and is not committed.
+#
 core:
   name: Ape.Core
   url: https://github.com/aklen/ape-core
