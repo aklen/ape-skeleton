@@ -150,7 +150,7 @@ def launcher_tfm() -> str:
     if bands:
         major, minor = bands[0]
         return f"net{major}.{minor}"
-    return "net9.0"
+    return "net10.0"
 
 
 def launcher_output_dir() -> Path:

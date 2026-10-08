@@ -9,7 +9,7 @@ cd ape-skeleton
 ./ape build
 ```
 
-`./ape build` and `./ape run` need the .NET SDK that matches `TargetFramework` in the checked-out projects. That is **net9.0** today. After those projects move to **net10.0**, install the .NET 10 SDK below. `./ape` reads the csproj files, detects the OS, and prints the install command when the SDK or runtime is missing. `apt install dotnet` is not that package.
+`./ape build` and `./ape run` need the .NET SDK that matches `TargetFramework` in the checked-out projects. That is **net10.0**. `./ape` reads the csproj files, detects the OS, and prints the install command when the SDK or runtime is missing. `apt install dotnet` is not that package.
 
 `workspace.yaml` lists remotes. Checkouts land under `src/` and are gitignored here — their history lives in those repos.
 
@@ -19,7 +19,7 @@ Add a module by appending it under `modules:` and running `./ape sync` again. A 
 
 Install the **SDK**. It includes the runtime, which is what `./ape build` and `./ape run` need. A runtime-only package can execute a published app; it cannot build this tree.
 
-Until `TargetFramework` is `net10.0`, install the 9.0 package the same way (`dotnet-sdk-9.0`, `brew install --cask dotnet-sdk@9`, `winget install Microsoft.DotNet.SDK.9`). `./ape` asks for whichever band the projects declare.
+Projects declare `net10.0`. `./ape` asks for whichever band the csproj files declare.
 
 Check what is installed:
 
@@ -55,7 +55,7 @@ To run a published app without the SDK, install `dotnet-runtime-10.0` (or `aspne
 sudo pacman -S dotnet-sdk-10.0
 ```
 
-`dotnet-sdk-10.0` depends on `dotnet-runtime-10.0`. While the tree still targets net9.0: `sudo pacman -S dotnet-sdk-9.0`. See the [ArchWiki .NET page](https://wiki.archlinux.org/title/.NET).
+`dotnet-sdk-10.0` depends on `dotnet-runtime-10.0`. See the [ArchWiki .NET page](https://wiki.archlinux.org/title/.NET).
 
 ### macOS
 
@@ -63,7 +63,7 @@ sudo pacman -S dotnet-sdk-10.0
 brew install --cask dotnet-sdk
 ```
 
-That cask is .NET 10. For the current net9.0 target: `brew install --cask dotnet-sdk@9`.
+That cask is .NET 10.
 
 Or the pkg installer from [.NET 10 downloads](https://dotnet.microsoft.com/download/dotnet/10.0): **Arm64** on Apple silicon, **x64** on Intel. Steps: [Install .NET on macOS](https://learn.microsoft.com/en-us/dotnet/core/install/macos).
 
