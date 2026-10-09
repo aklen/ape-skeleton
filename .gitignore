@@ -173,3 +173,8 @@ outputs/
 /src/Ape.Launcher/
 /src/Ape.Modules/*
 !/src/Ape.Modules/.gitkeep
+
+*.pdf
+
+# Local design notes. The public tree stays English.
+.cursor/plans/
