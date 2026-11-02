@@ -96,11 +96,17 @@ Every feature ships as an `Ape.Module.*` project. A module is **not** only a fol
 Ape.Module.Example/
 ├── Common/           # shared Models, Interfaces, Utils
 ├── Graph/            # optional: ComponentGraph + stages
-├── Plugins/          # IPlugin assemblies
+├── Plugins/          # IPlugin assemblies - each plugin in its own folder
 ├── Services/         # background services
 ├── SceneEntities/    # optional: replica types + registration service
+|   ├── Interfaces
+|   ├── Models
+|   ├── TypeIds
+|       └── i.e.: DeviceSceneEntityTypeIds.cs
+|   └── Services/
+|       └── i.e.: DeviceSceneEntityRegistrationService.cs
 ├── Docs/
-├── Samples/
+├── Samples/          # config files, i.e.: device-example.json
 └── Tests/
 ```
 
@@ -328,8 +334,6 @@ public class ModifierPlugin : IPlugin, IDeterministicFrameParticipant
 
 The Core applicator applies the batch after all participants return; property setters (and `PropertyChangedEvent`) run there, not in the plugin.
 
-
-
 ### 5. Plugin: React to Changes
 
 ```csharp
@@ -479,8 +483,8 @@ var cube = sceneManager.GetNodeByPath("/Cube");  // ← Clear & readable
 
 When creating a plugin that modifies scene objects:
 
-- [ ] Resolve **`ISceneRead`** in `OnInit` (not `ISceneManager` — plugin DI returns null)
-- [ ] Register as **`IDeterministicFrameParticipant`** and enqueue **`ISceneCommitRequest`** on `IFrameCommitBatch` in `OnHostFrame`
+- [ ] Resolve `ISceneRead` in `OnInit` (not `ISceneManager` — plugin DI returns null)
+- [ ] Register as `IDeterministicFrameParticipant` and enqueue `ISceneCommitRequest` on `IFrameCommitBatch` in `OnHostFrame`
 - [ ] Prefer generic `SetSceneNodePropertyCommitRequest` / `SetSceneEntityPropertyCommitRequest` over a new type per property
 - [ ] Do **not** assign `node.Position` (throws outside Core apply scope)
 - [ ] **Never** call `IEventManager.Publish()` manually for property-change notifications (applicator setters do that)
@@ -499,22 +503,22 @@ When creating a plugin that modifies scene objects:
 ## 🎯 Summary
 
 
-| Aspect                    | Implementation                               |
-| ------------------------- | -------------------------------------------- |
-| **Architecture**          | 3-Tier: Core → Services → Plugins            |
-| **Service Registration**  | Services register in DI during Initialize()  |
-| **Service Lifecycle**     | Start() before plugins, Stop() after plugins |
-| **Plugin Service Access** | Core allowlist + trusted `Ape.Module.*` (not foolproof) |
-| **Event Source**          | Property setters ONLY                        |
-| **Object Lookup**         | `ISceneRead.GetNodeByPath(string)`           |
-| **Event Type**            | `PropertyChangedEvent`                       |
-| **Auto-Trigger**          | `SetProperty<T>()` helper                    |
-| **Network Sync**          | Deserialize → Setter → Event                 |
-| **Thread Model**          | Plugin-specific event queues                 |
+| Aspect                    | Implementation                                                         |
+| ------------------------- | ---------------------------------------------------------------------- |
+| **Architecture**          | 3-Tier: Core → Services → Plugins                                      |
+| **Service Registration**  | Services register in DI during Initialize()                            |
+| **Service Lifecycle**     | Start() before plugins, Stop() after plugins                           |
+| **Plugin Service Access** | Core allowlist + trusted `Ape.Module.`* (not foolproof)                |
+| **Event Source**          | Property setters ONLY                                                  |
+| **Object Lookup**         | `ISceneRead.GetNodeByPath(string)`                                     |
+| **Event Type**            | `PropertyChangedEvent`                                                 |
+| **Auto-Trigger**          | `SetProperty<T>()` helper                                              |
+| **Network Sync**          | Deserialize → Setter → Event                                           |
+| **Thread Model**          | Plugin-specific event queues                                           |
 | **Module execution**      | `ComponentGraph` authored at init → frozen `FrozenPlan` per host frame |
-| **Scene writes**          | `IFrameCommitBatch` in COMMIT (`OnHostFrame`) |
-| **Async input**           | `IIngress<T>` (not the scene sink)           |
-| **Manual Publish**        | ❌ NEVER for property changes                 |
+| **Scene writes**          | `IFrameCommitBatch` in COMMIT (`OnHostFrame`)                          |
+| **Async input**           | `IIngress<T>` (not the scene sink)                                     |
+| **Manual Publish**        | ❌ NEVER for property changes                                           |
 
 
 ---
@@ -749,11 +753,11 @@ build/bin/Ape.Launcher/<Configuration>/net10.0/
 Framework for splitting **scene graph DTOs and factories** between **Core** and **modules** without breaking MessagePack / replication.
 
 
-| Package                      | Role                                                                                                                                                                                            |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Ape.Core**                 | Contracts (`IEntity`, `INode`, `ISceneManager`, `ISceneEntityRegistry`), `Node` / minimal `Entity`, replication infra. **No** domain-specific entity types; `typeId` constants live in modules. |
-| **Ape.Module.Example**            | Domain entities + registry bootstrap                                                                                                                                                            |
-| **Other modules**            | Register their own scene types the same way (private modules follow the same pattern)                                                                                                           |
+| Package                | Role                                                                                                                                                                                            |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Ape.Core**           | Contracts (`IEntity`, `INode`, `ISceneManager`, `ISceneEntityRegistry`), `Node` / minimal `Entity`, replication infra. **No** domain-specific entity types; `typeId` constants live in modules. |
+| **Ape.Module.Example** | Domain entities + registry bootstrap                                                                                                                                                            |
+| **Other modules**      | Register their own scene types the same way (private modules follow the same pattern)                                                                                                           |
 
 
 **Registry pattern:** `SceneManager` does not hard-code domain types — modules register factories via `ICoreService` at host startup (`CreateRegisteredEntity`).
@@ -846,6 +850,8 @@ hidden execution ordering     →  FrozenPlan + StageOrder
 
 > **No hidden execution. No hidden state. No hidden time.**
 
+
+
 ### Initialization-time freeze (not C# compile time)
 
 `new ComponentGraph<TScratch>(...).Compile()` is still **runtime compilation**. It runs during `OnInit`, before any host frame. That is stronger than “the graph grows as messages arrive”, and weaker than Roslyn / source-generation compile time.
@@ -858,11 +864,13 @@ If a later source generator moves the same IR to build time, that is when the te
 
 Nested graphs are an **authoring-time** abstraction. The developer sees `decode/eph/gate`; the tick loop sees a flat `IStage[]` plus a 64-bit enable mask.
 
-| Layer | Types | Lives until |
-| ----- | ----- | ----------- |
-| **Authoring** | `Component<TScratch>`, `ComponentGraph<TScratch>`, `IStage<TScratch>` | `Compile()` |
-| **IR** | `GraphDefinition` (internal) | compile only |
-| **Runtime** | `FrozenPlan<TScratch>` + `PlanRuntime` + `TScratch` | plugin lifetime |
+
+| Layer         | Types                                                                 | Lives until     |
+| ------------- | --------------------------------------------------------------------- | --------------- |
+| **Authoring** | `Component<TScratch>`, `ComponentGraph<TScratch>`, `IStage<TScratch>` | `Compile()`     |
+| **IR**        | `GraphDefinition` (internal)                                          | compile only    |
+| **Runtime**   | `FrozenPlan<TScratch>` + `PlanRuntime` + `TScratch`                   | plugin lifetime |
+
 
 `ComponentGraph<TScratch>.Compile()` walks the nested tree, assigns **qualified stage ids** (`decode/parse`, `decode/eph/gate`), validates HSM targets/states, and returns a `FrozenPlan`. After that the authoring objects can be discarded. `Tick` is a `for` loop over an array plus an HSM mask — not a graph walk.
 
@@ -887,6 +895,8 @@ serial-io                                   watch
 ├── rinex
 └── publish
 ```
+
+
 
 ### Compiler: now vs next
 
@@ -944,10 +954,12 @@ Analysis is **permissive**: missing `Describe` is allowed. `CG207` proves `|W_de
 
 Later compiler modes (roadmap, not built):
 
-| Mode | Rule | Guarantee |
-| ---- | ---- | --------- |
-| **Permissive** (now) | `Describe` optional | best-effort on declared access |
-| **Strict** | graph-relevant scratch access must be declared | closed-world: the compiler's `|W| ≤ 1` and tick-order facts cover every access |
+
+| Mode                 | Rule                                           | Guarantee                      |
+| -------------------- | ---------------------------------------------- | ------------------------------ |
+| **Permissive** (now) | `Describe` optional                            | best-effort on declared access |
+| **Strict**           | graph-relevant scratch access must be declared | closed-world: the compiler's ` |
+
 
 `CompilerAccepted(P)` ⇒ the **enforced** invariants hold (CG104, CG207, CG208, …). That is not `CompilerAccepted(P)` ⇒ `Correct(P)`. Undeclared scratch access is invisible in Permissive mode. Do not claim **correct-by-construction** or closed-world safety until Strict exists, plus Effect IR and temporal / freshness validation.
 
@@ -996,7 +1008,7 @@ Cap(3)+oldest →  [F3, F4, F5]
 Reduce        →  R(F1..F5)
 ```
 
-Today SAMPLE is an implicit host copy (`pending[]` → scratch). A later `ExposeIn(..., sample: Latest | DrainAll.Cap(64).Overflow(DropOldest))` makes that contract compiler-visible. Implement **Sampling on `ExposeIn` first**; that is where 60 fps cameras vs a 60 Hz tick actually meet.
+Today SAMPLE is an implicit host copy (`pending[]` → scratch). A later `ExposeIn(..., sample: Latest | DrainAll.Cap(64).Overflow(DropOldest))` makes that contract compiler-visible. Implement **Sampling on** `ExposeIn` **first**; that is where 60 fps cameras vs a 60 Hz tick actually meet.
 
 **Delivery** is authoring syntax on `Connect` for skipped consumers or N→K slots (camera enabled every tick, detector every fourth; a producer writing a collection the consumer cannot drain). It is **not** a hidden edge queue. `TScratch` remains the only runtime data bus.
 
@@ -1046,9 +1058,9 @@ Connection 'serial/bytes -> decode/bytes' has unresolved producer 'serial/bytes'
 
 Still later: latched initialization analysis, then scene writes outside commit (`CG311`). Runtime data still moves through `TScratch`; Port IR is the compiler's view of that bus, not a second PortBag.
 
-`CG208` on a `Connect` first uses **leaf** Reads/Writes when both ends declared them for that slot. Otherwise it falls back to an **owner-prefix span** (last enabled stage in the producer component vs first in the consumer). Nested graphs make that span conservative: extra siblings in `decode/*` count even if they do not touch the slot. The span is not the final dependency semantics.
+`CG208` on a `Connect` first uses **leaf** Reads/Writes when both ends declared them for that slot. Otherwise it falls back to an **owner-prefix span** (last enabled stage in the producer component vs first in the consumer). Nested graphs make that span conservative: extra siblings in `decode/`* count even if they do not touch the slot. The span is not the final dependency semantics.
 
-**Deterministic last-writer in `StageOrder` is not an arbitration rule.** Two declared writers of the same slot in one state is `CG207` until an explicit policy exists.
+**Deterministic last-writer in** `StageOrder` **is not an arbitration rule.** Two declared writers of the same slot in one state is `CG207` until an explicit policy exists.
 
 ### Introspection
 
@@ -1064,17 +1076,17 @@ plan.ExplainStage("decode/eph/gate");
 
 ### Scratch, stages, HSM
 
-**`TScratch`** is a single shared struct (or class) that stages read and write. Port IR *describes* those members (full path, e.g. `Decode.Frames`); it does not replace them. There is no PortBag at tick time: if `parse` produced frames, `demux` reads `scratch.Frames`. Keep scratch fields explicit; that is the data bus.
+`TScratch` is a single shared struct (or class) that stages read and write. Port IR *describes* those members (full path, e.g. `Decode.Frames`); it does not replace them. There is no PortBag at tick time: if `parse` produced frames, `demux` reads `scratch.Frames`. Keep scratch fields explicit; that is the data bus.
 
-**`IStage<TScratch>`** is one `Execute(ref TScratch)` call when the plan enables it. Optional `Describe` declares scratch Reads/Writes for the compiler (`CG207`, leaf `CG208`). Empty `Describe` means those accesses are **invisible** to writer analysis — not that they do not happen (permissive mode). Stages may keep **private buffers** (a UBX extractor accumulating bytes). That instance state is part of the machine: replay from a cold `Compile()` + `InitRuntime`, not from a mid-stream object.
+`IStage<TScratch>` is one `Execute(ref TScratch)` call when the plan enables it. Optional `Describe` declares scratch Reads/Writes for the compiler (`CG207`, leaf `CG208`). Empty `Describe` means those accesses are **invisible** to writer analysis — not that they do not happen (permissive mode). Stages may keep **private buffers** (a UBX extractor accumulating bytes). That instance state is part of the machine: replay from a cold `Compile()` + `InitRuntime`, not from a mid-stream object.
 
-**`PlanRuntime`** holds HSM state, a FIFO event queue, and a 64-bit enable mask (so a plan currently has at most **64** stages). It is **not** compiled IR.
+`PlanRuntime` holds HSM state, a FIFO event queue, and a 64-bit enable mask (so a plan currently has at most **64** stages). It is **not** compiled IR.
 
 **HSM** (`ComponentGraph.Hsm`) is the **control plane of the compiled dataflow**, not a side state tracker.
 
 Two principles:
 
-> **Hierarchy is erased from execution, but preserved as an addressing namespace.** Nested `Add` is gone after `Compile()`; `"decode"` still names `decode/*` in a state's activation set.
+> **Hierarchy is erased from execution, but preserved as an addressing namespace.** Nested `Add` is gone after `Compile()`; `"decode"` still names `decode/`* in a state's activation set.
 
 > **The execution mask is solely a function of the current HSM state:** `M_t = A(S_t)`. A transition replaces the mask; it does not incrementally mutate the previous one.
 
@@ -1124,7 +1136,7 @@ If SAMPLE enqueues `DeviceMatch` then `PortOpen` on the same frame, control walk
 
 Events that appear **during** `Execute` (if a stage somehow enqueues them) wait for the **next** frame's control phase. Dataflow must not change this tick's mask.
 
-Port IR is the compiler's view of the scratch bus; **`TScratch` remains the runtime store**. There is no PortBag at tick time.
+Port IR is the compiler's view of the scratch bus; `TScratch` **remains the runtime store**. There is no PortBag at tick time.
 
 A `Connect` is a **current-tick** dependency: the producer must run *before* the consumer in `StageOrder` in every state where both are active (`CG208`). An unconnected `ExposeIn` is **sampled** — the host SAMPLE phase wrote it, so there is no graph producer to order against.
 
@@ -1143,13 +1155,15 @@ PollEvents → IHostFrameRunner.RunNextFrame()
 
 `RaiseHostFrame` is the test/Core-internal collection API. Production must not call it and then `ReplicaManager.Tick()` itself — a `false` result would be easy to ignore.
 
-`RunNextFrame` calls every `IDeterministicFrameParticipant.OnHostFrame` in **`Phase → Order → ParticipantId`** order, each with a host-thread **`IFrameCommitBatch`** that is **sealed** when the call returns, then applies concatenated batches. Plugins register through **`IFrameParticipantRegistry`**. A graph plugin registers in `OnInit` and does **three phases** inside `OnHostFrame`:
+`RunNextFrame` calls every `IDeterministicFrameParticipant.OnHostFrame` in `Phase → Order → ParticipantId` order, each with a host-thread `IFrameCommitBatch` that is **sealed** when the call returns, then applies concatenated batches. Plugins register through `IFrameParticipantRegistry`. A graph plugin registers in `OnInit` and does **three phases** inside `OnHostFrame`:
 
-| Phase | What belongs here | What must not happen here |
-| ----- | ----------------- | ------------------------- |
-| **SAMPLE** | Drain ingress buffers into scratch; enqueue HSM events | Parse, decode, scene writes |
-| **TICK** | `_plan.Tick(ref scratch, ref rt)` | OS I/O, spawning work, mutating `ISceneManager` |
+
+| Phase      | What belongs here                                             | What must not happen here                                             |
+| ---------- | ------------------------------------------------------------- | --------------------------------------------------------------------- |
+| **SAMPLE** | Drain ingress buffers into scratch; enqueue HSM events        | Parse, decode, scene writes                                           |
+| **TICK**   | `_plan.Tick(ref scratch, ref rt)`                             | OS I/O, spawning work, mutating `ISceneManager`                       |
 | **COMMIT** | Enqueue `scratch.Commits` on the provided `IFrameCommitBatch` | Extra stage execution after commit; capturing the batch for callbacks |
+
 
 Async I/O (`SerialDataHandler.DataReceived`, TCP completions) **only appends to a pending buffer**. The next SAMPLE copies that buffer into `scratch.IngressChunk` (or equivalent). That copy **is** today’s Sampling policy (usually drain-all of what arrived). That is what makes the tick **replayable**: the ordered sample is the input log; `Tick` is a pure-enough reducer. Do not parse, fuse, or apply overflow inside the I/O callback.
 
@@ -1165,6 +1179,8 @@ device matched → flag            + EnqueueEvent("device-match" | "port-open" |
                                           ↓
                                ReplicaManager.Tick() (post-commit)
 ```
+
+
 
 ### Minimal example
 
@@ -1231,27 +1247,33 @@ public void OnHostFrame(in FrameContext context, IFrameCommitBatch commits)
 }
 ```
 
+
+
 ### Determinism and replay
 
 A frozen plan is a **fixed program**: declaration-order stages, FIFO HSM, **per-state compiled masks**. Logical replay (same ordered inputs → same domain outputs) follows if you keep I/O and clocks **outside** `Execute`. The enabled subset after a tick depends only on the resulting HSM state, not on the path taken to reach it.
 
-| Do | Why it replays |
-| -- | -------------- |
-| Freeze once in `OnInit`; tick the same `FrozenPlan` | Stage order and HSM table never change while ticking |
-| Declare activation on `State(...)`, not on `On(...)` | `M = f(S)`; retries and alternate paths cannot leak stages |
-| SAMPLE then TICK then COMMIT, once per `frameId` | Matches the host commit window; observers see post-commit state |
-| Record `(frameId, ingress bytes, HSM events)` | That tuple is the journal for this plugin |
-| Scene mutations only on `IFrameCommitBatch` | Single writer; golden tests hash the applied scene |
-| Assert `plan.StageOrder` in tests | Refactors that shuffle `Add` order are visible |
 
-| Don't (breaks replay) | Why |
-| --------------------- | --- |
-| Parse or publish from `DataReceived` | OS callback order is not a frame |
-| `DateTime.UtcNow` / RNG inside `Execute` | Observation time belongs in SAMPLE or an injected `IFrameClock` |
-| Direct `ISceneManager` writes from a stage | Bypasses the commit window and participant order |
-| Rely on dictionary iteration or extra threads inside `Tick` | Hidden ordering |
-| Hidden queue / Rx channel behind `Connect` | Second bus; temporal state is not in scratch or the SAMPLE journal |
-| Change sampling without an HSM event | `Policy_t` leaves `State_t`; two replays can diverge |
+| Do                                                   | Why it replays                                                  |
+| ---------------------------------------------------- | --------------------------------------------------------------- |
+| Freeze once in `OnInit`; tick the same `FrozenPlan`  | Stage order and HSM table never change while ticking            |
+| Declare activation on `State(...)`, not on `On(...)` | `M = f(S)`; retries and alternate paths cannot leak stages      |
+| SAMPLE then TICK then COMMIT, once per `frameId`     | Matches the host commit window; observers see post-commit state |
+| Record `(frameId, ingress bytes, HSM events)`        | That tuple is the journal for this plugin                       |
+| Scene mutations only on `IFrameCommitBatch`          | Single writer; golden tests hash the applied scene              |
+| Assert `plan.StageOrder` in tests                    | Refactors that shuffle `Add` order are visible                  |
+
+
+
+| Don't (breaks replay)                                       | Why                                                                |
+| ----------------------------------------------------------- | ------------------------------------------------------------------ |
+| Parse or publish from `DataReceived`                        | OS callback order is not a frame                                   |
+| `DateTime.UtcNow` / RNG inside `Execute`                    | Observation time belongs in SAMPLE or an injected `IFrameClock`    |
+| Direct `ISceneManager` writes from a stage                  | Bypasses the commit window and participant order                   |
+| Rely on dictionary iteration or extra threads inside `Tick` | Hidden ordering                                                    |
+| Hidden queue / Rx channel behind `Connect`                  | Second bus; temporal state is not in scratch or the SAMPLE journal |
+| Change sampling without an HSM event                        | `Policy_t` leaves `State_t`; two replays can diverge               |
+
 
 **Replay:** a module may persist an append-only SAMPLE journal (ordered ingress, frame id, logical time, config hash) and replay it on `IsolatedSceneReplayHost` with no live I/O. Keep journals off shared/untrusted storage. See [DETERMINISM.md](../src/Ape.Core/docs/DETERMINISM.md).
 
