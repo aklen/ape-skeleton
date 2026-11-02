@@ -707,14 +707,29 @@ def publish(args):
 
 
 @dataclass(frozen=True)
+class WorkspaceSource:
+    """One clone/fetch candidate (tried in order until one succeeds)."""
+
+    url: str
+    ref: str
+
+
+@dataclass(frozen=True)
 class WorkspaceEntry:
     """One checkout from workspace.yaml (core, launcher, or module)."""
 
     role: str
     name: str
-    url: str
-    ref: str
     path: str
+    sources: Tuple[WorkspaceSource, ...]
+
+    @property
+    def url(self) -> str:
+        return self.sources[0].url
+
+    @property
+    def ref(self) -> str:
+        return self.sources[0].ref
 
     def dest(self, root: Path) -> Path:
         """Disk path: yaml path + name, unless path already ends with name."""
@@ -740,17 +755,74 @@ def _strip_yaml_comment(line: str) -> str:
     return "".join(out)
 
 
+def _yaml_scalar(value: str) -> str:
+    return value.strip().strip("'").strip('"')
+
+
 def parse_workspace_yaml(text: str) -> List[WorkspaceEntry]:
-    """Minimal parser for core/launcher maps and a modules list. No PyYAML required."""
+    """Minimal parser for core/launcher maps and a modules list. No PyYAML required.
+
+    Supports legacy `url` + `ref`, or ordered `sources:` fallbacks:
+
+      sources:
+        - url: gitea@host:org/repo.git
+          ref: main
+        - url: https://github.com/org/repo
+          ref: main
+    """
     entries: List[WorkspaceEntry] = []
     role: Optional[str] = None
     current: dict = {}
+    sources: List[dict] = []
+    in_sources = False
+    source_item: Optional[dict] = None
+
+    def finish_source() -> None:
+        nonlocal source_item
+        if source_item is not None:
+            sources.append(source_item)
+            source_item = None
 
     def flush() -> None:
-        nonlocal current
+        nonlocal current, sources, in_sources, source_item
+        finish_source()
         if not current:
+            in_sources = False
+            sources = []
             return
-        missing = [k for k in ("name", "url", "ref", "path") if not current.get(k)]
+
+        name = current.get("name")
+        path = current.get("path")
+        default_ref = current.get("ref")
+        built: List[WorkspaceSource] = []
+
+        if sources:
+            for i, raw in enumerate(sources):
+                url = raw.get("url")
+                if not url:
+                    raise ValueError(
+                        f"workspace.yaml: {name or role or 'entry'} sources[{i}] missing url"
+                    )
+                ref = raw.get("ref") or default_ref
+                if not ref:
+                    raise ValueError(
+                        f"workspace.yaml: {name or role or 'entry'} sources[{i}] missing ref "
+                        "(set per-source ref or a top-level ref)"
+                    )
+                built.append(WorkspaceSource(url=url, ref=ref))
+        elif current.get("url"):
+            if not default_ref:
+                raise ValueError(
+                    f"workspace.yaml: incomplete {name or role or 'entry'} (missing ref)"
+                )
+            built.append(WorkspaceSource(url=current["url"], ref=default_ref))
+        else:
+            raise ValueError(
+                f"workspace.yaml: incomplete {name or role or 'entry'} "
+                "(need url+ref or sources)"
+            )
+
+        missing = [k for k in ("name", "path") if not current.get(k)]
         if missing:
             raise ValueError(
                 f"workspace.yaml: incomplete {role or 'entry'} (missing {', '.join(missing)})"
@@ -758,13 +830,15 @@ def parse_workspace_yaml(text: str) -> List[WorkspaceEntry]:
         entries.append(
             WorkspaceEntry(
                 role=role or "module",
-                name=current["name"],
-                url=current["url"],
-                ref=current["ref"],
-                path=current["path"],
+                name=name,
+                path=path,
+                sources=tuple(built),
             )
         )
         current = {}
+        sources = []
+        in_sources = False
+        source_item = None
 
     for raw in text.splitlines():
         line = _strip_yaml_comment(raw).rstrip()
@@ -777,19 +851,57 @@ def parse_workspace_yaml(text: str) -> List[WorkspaceEntry]:
             flush()
             key = stripped[:-1].strip()
             role = "module" if key == "modules" else key
-            current = {}
             continue
 
-        if stripped.startswith("- "):
+        # Nested source list item: "  - url: ..." under sources:
+        if in_sources and stripped.startswith("- "):
+            finish_source()
+            source_item = {}
+            stripped = stripped[2:].strip()
+            if ":" not in stripped:
+                continue
+            key, _, value = stripped.partition(":")
+            key = key.strip()
+            value = _yaml_scalar(value)
+            if key == "sources":
+                raise ValueError("workspace.yaml: nested sources are not supported")
+            if value == "" and key == "url":
+                raise ValueError("workspace.yaml: source url cannot be empty")
+            source_item[key] = value
+            continue
+
+        # New module list item (not inside sources)
+        if stripped.startswith("- ") and not in_sources:
             flush()
             role = "module"
-            current = {}
             stripped = stripped[2:].strip()
+            if ":" not in stripped:
+                continue
+            key, _, value = stripped.partition(":")
+            current[key.strip()] = _yaml_scalar(value)
+            continue
 
         if ":" not in stripped:
             continue
         key, _, value = stripped.partition(":")
-        current[key.strip()] = value.strip().strip("'").strip('"')
+        key = key.strip()
+        value = _yaml_scalar(value)
+
+        if key == "sources" and value == "":
+            finish_source()
+            in_sources = True
+            continue
+
+        if in_sources and source_item is not None and indent >= 6:
+            source_item[key] = value
+            continue
+
+        # Entry-level key ends the sources block (e.g. path: after sources)
+        if in_sources:
+            finish_source()
+            in_sources = False
+
+        current[key] = value
 
     flush()
     if not entries:
@@ -857,6 +969,75 @@ def _filter_workspace_entries(
     return matched
 
 
+def _format_sources(sources: Sequence[WorkspaceSource]) -> str:
+    return " | ".join(f"{s.url}@{s.ref}" for s in sources)
+
+
+def _clone_source(dest: Path, source: WorkspaceSource) -> bool:
+    """Clone one URL; leave dest absent on failure."""
+    clone = _git(["clone", "--branch", source.ref, "--", source.url, str(dest)])
+    if clone.returncode == 0:
+        return True
+    if dest.exists():
+        shutil.rmtree(dest)
+    clone = _git(["clone", "--", source.url, str(dest)])
+    if clone.returncode != 0:
+        if dest.exists():
+            shutil.rmtree(dest)
+        return False
+    check = _git(["checkout", source.ref], cwd=dest)
+    if check.returncode != 0:
+        shutil.rmtree(dest)
+        return False
+    return True
+
+
+def _origin_has_ref(dest: Path, ref: str) -> bool:
+    return (
+        subprocess.run(
+            ["git", "rev-parse", "--verify", f"origin/{ref}^{{commit}}"],
+            cwd=dest,
+            capture_output=True,
+            text=True,
+        ).returncode
+        == 0
+    )
+
+
+def _fetch_source(dest: Path, source: WorkspaceSource) -> bool:
+    """Fetch source.url into refs/remotes/origin/* without relying on remote names."""
+    mapped = _git(
+        [
+            "fetch",
+            "--tags",
+            "--",
+            source.url,
+            f"+refs/heads/{source.ref}:refs/remotes/origin/{source.ref}",
+        ],
+        cwd=dest,
+    )
+    if mapped.returncode == 0 and _origin_has_ref(dest, source.ref):
+        return True
+    # Tags / odd refs: full fetch from URL, then hope checkout can resolve ref.
+    full = _git(["fetch", "--tags", "--", source.url], cwd=dest)
+    return full.returncode == 0
+
+
+def _checkout_ref(dest: Path, ref: str, force: bool) -> bool:
+    origin_ref = f"origin/{ref}"
+    if _origin_has_ref(dest, ref):
+        # -B + origin/ref follows rewritten history (force-push); --force discards local edits.
+        checkout_cmd = ["checkout", "-B", ref, origin_ref]
+        if force:
+            checkout_cmd.insert(1, "--force")
+    else:
+        checkout_cmd = ["checkout"]
+        if force:
+            checkout_cmd.append("--force")
+        checkout_cmd.append(ref)
+    return _git(checkout_cmd, cwd=dest).returncode == 0
+
+
 def sync_workspace(args) -> None:
     """Clone or update checkouts listed in workspace.yaml (path + name)."""
     print_header("Workspace sync")
@@ -883,69 +1064,51 @@ def sync_workspace(args) -> None:
             continue
 
         if not dest.exists():
-            msg = f"{label}: clone {entry.url} @ {entry.ref}"
+            msg = f"{label}: clone {_format_sources(entry.sources)}"
             if dry:
                 print_info(f"dry-run  {msg}")
                 continue
             print_info(msg)
             dest.parent.mkdir(parents=True, exist_ok=True)
-            clone = _git(["clone", "--branch", entry.ref, "--", entry.url, str(dest)])
-            if clone.returncode != 0:
-                if dest.exists():
-                    shutil.rmtree(dest)
-                clone = _git(["clone", "--", entry.url, str(dest)])
-                if clone.returncode != 0:
-                    print_error(f"{label}: clone failed")
-                    failed = True
-                    continue
-                check = _git(["checkout", entry.ref], cwd=dest)
-                if check.returncode != 0:
-                    print_error(f"{label}: checkout {entry.ref} failed")
-                    failed = True
-                    continue
-            print_success(f"{label}: cloned")
+            cloned_from: Optional[WorkspaceSource] = None
+            for source in entry.sources:
+                print_info(f"{label}: trying {source.url} @ {source.ref}")
+                if _clone_source(dest, source):
+                    cloned_from = source
+                    break
+                print_warning(f"{label}: unreachable {source.url}")
+            if cloned_from is None:
+                print_error(f"{label}: clone failed (all sources)")
+                failed = True
+                continue
+            print_success(f"{label}: cloned from {cloned_from.url} @ {cloned_from.ref}")
             continue
 
         if _git_dirty(dest) and not args.force:
             print_warning(f"{label}: skip (dirty working tree; commit/stash or pass --force)")
             continue
 
-        msg = f"{label}: fetch + reset {entry.ref}"
+        msg = f"{label}: fetch + reset ({_format_sources(entry.sources)})"
         if dry:
             print_info(f"dry-run  {msg}")
             continue
         print_info(msg)
-        fetched = _git(["fetch", "--tags", "origin"], cwd=dest)
-        if fetched.returncode != 0:
-            print_error(f"{label}: fetch failed")
+        fetched_from: Optional[WorkspaceSource] = None
+        for source in entry.sources:
+            print_info(f"{label}: trying fetch {source.url} @ {source.ref}")
+            if _fetch_source(dest, source):
+                fetched_from = source
+                break
+            print_warning(f"{label}: unreachable {source.url}")
+        if fetched_from is None:
+            print_error(f"{label}: fetch failed (all sources)")
             failed = True
             continue
-        origin_ref = f"origin/{entry.ref}"
-        origin_has_ref = (
-            subprocess.run(
-                ["git", "rev-parse", "--verify", f"{origin_ref}^{{commit}}"],
-                cwd=dest,
-                capture_output=True,
-                text=True,
-            ).returncode
-            == 0
-        )
-        if origin_has_ref:
-            # -B + origin/ref follows rewritten history (force-push); --force discards local edits.
-            checkout_cmd = ["checkout", "-B", entry.ref, origin_ref]
-            if args.force:
-                checkout_cmd.insert(1, "--force")
-        else:
-            checkout_cmd = ["checkout"]
-            if args.force:
-                checkout_cmd.append("--force")
-            checkout_cmd.append(entry.ref)
-        checked = _git(checkout_cmd, cwd=dest)
-        if checked.returncode != 0:
-            print_error(f"{label}: checkout {entry.ref} failed")
+        if not _checkout_ref(dest, fetched_from.ref, args.force):
+            print_error(f"{label}: checkout {fetched_from.ref} failed")
             failed = True
             continue
-        print_success(f"{label}: at {entry.ref}")
+        print_success(f"{label}: at {fetched_from.ref} via {fetched_from.url}")
 
     if failed:
         sys.exit(1)
